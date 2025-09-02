@@ -1,0 +1,8 @@
+streamlit
+groq
+crawl4ai
+python-dotenv
+duckduckgo-search
+aiohttp
+pandas
+playwright
