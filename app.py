@@ -12,10 +12,6 @@
 # - Safer exception handling (surface useful info without crashing)
 # - Minor copy tweaks for clearer errors
 
-import subprocess
-
-# Install Chromium for Playwright
-subprocess.run(["playwright", "install", "chromium"])
 
 import os
 import re
