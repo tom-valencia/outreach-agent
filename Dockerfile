@@ -15,4 +15,4 @@ RUN python -m playwright install --with-deps chromium
 COPY . .
 
 # Run your app (replace with your actual entrypoint)
-CMD ["python", "app.py"]
+CMD ["streamlit", "run", "app.py"]
