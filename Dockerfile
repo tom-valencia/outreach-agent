@@ -15,4 +15,4 @@ RUN python -m playwright install --with-deps chromium
 COPY . .
 
 # Run your app (replace with your actual entrypoint)
-CMD ["streamlit", "run", "app.py"]
+CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
