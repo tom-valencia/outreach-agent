@@ -14,6 +14,9 @@
 # - ADDED: Manual prospect entry (paste emails and optional fields)
 # - FIX: Safe reset for manual input via flag + st.rerun() (avoid StreamlitAPIException)
 # - SMTP: Support starttls/ssl/none, correct envelope sender, better errors, send_message()
+# - NEW: Lean HTML email template (text-first), CID-embedded hca_logo.png, plain-text alternative, and Preview
+# - UPDATE: Bigger visual spacing for single newlines in emails (double <br> per \n, paragraph bottom margin, line-height 28px)
+# - UPDATE: Plain-text alternative also adds extra newlines for readability
 
 import os
 import re
@@ -23,8 +26,10 @@ import sqlite3
 import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from email.utils import formataddr
 from typing import List, Dict, Optional, Tuple
+from datetime import datetime
 import time, random
 
 import streamlit as st
@@ -123,6 +128,20 @@ def _signature_from_settings() -> str:
         return f"\n\n—\n{name}\n{title}"
     return f"\n\n—\n{name or title}"
 
+def _signature_html_from_settings() -> str:
+    name = (st.session_state.get("sender_name") or os.environ.get("SENDER_NAME") or "").strip()
+    title = (st.session_state.get("sender_title") or os.environ.get("SENDER_TITLE") or "").strip()
+    if not name and not title:
+        return ""
+    line2 = f"<div>{title}</div>" if title else ""
+    return f"""
+<div style="margin-top:16px;">
+  <div>—</div>
+  <div><strong>{name or title}</strong></div>
+  {line2}
+</div>
+""".strip()
+
 def _fill_and_strip_placeholders(text: str, prospect: Dict) -> str:
     """Replaces common tokens with data, then strips any leftover bracketed tokens."""
     repl = {
@@ -132,7 +151,6 @@ def _fill_and_strip_placeholders(text: str, prospect: Dict) -> str:
         "[Title]": (prospect.get("title") or "").strip(),
         "[Website]": (prospect.get("website") or "").strip(),
     }
-    # Specific replacements for common AI-generated placeholders
     for k, v in repl.items():
         if v:
             text = text.replace(k, v)
@@ -141,7 +159,7 @@ def _fill_and_strip_placeholders(text: str, prospect: Dict) -> str:
     text = re.sub(r"\{\{\s*name\s*\}\}|\{\s*name\s*\}", repl["[Name]"], text, flags=re.IGNORECASE)
     text = re.sub(r"\{\{\s*company\s*\}\}|\{\s*company\s*\}", repl["[Company]"], text, flags=re.IGNORECASE)
 
-    # Strip any remaining single-word bracket tokens like [Something] or {{Something}}
+    # Strip remaining single-word bracket tokens like [Something] or {{Something}}
     text = re.sub(r"\[[A-Za-z][A-Za-z_ -]{0,24}\]", "", text)
     text = re.sub(r"\{\{[A-Za-z][A-Za-z_ -]{0,24}\}\}", "", text)
 
@@ -151,7 +169,7 @@ def _fill_and_strip_placeholders(text: str, prospect: Dict) -> str:
     return text
 
 def finalize_email(subject: str, body: str, prospect: Dict) -> Tuple[str, str]:
-    """Cleans placeholders and adds a signature to the email body."""
+    """Cleans placeholders and adds a signature to the email body (text)."""
     final_subject = _fill_and_strip_placeholders(subject or "", prospect)
     final_body = _fill_and_strip_placeholders(body or "", prospect)
 
@@ -162,6 +180,98 @@ def finalize_email(subject: str, body: str, prospect: Dict) -> Tuple[str, str]:
             final_body += sig
 
     return final_subject, final_body
+
+# ------- EMAIL HTML TEMPLATE (lean, text-first) -------
+def _text_to_html_paragraphs(text: str) -> str:
+    """
+    Convert a mostly-text body into minimal HTML paragraphs and links.
+    - Preserves line breaks into <br><br> within paragraphs separated by blank lines.
+    - Converts bare URLs to clickable links.
+    - Adds bottom margin to paragraphs for clearer separation.
+    """
+    text = (text or "").strip()
+    # Linkify http(s) URLs
+    text = re.sub(r'(?i)\bhttps?://[^\s<>"\)\]]+', lambda m: f'<a href="{m.group(0)}">{m.group(0)}</a>', text)
+    # Split on blank lines -> paragraphs
+    parts = re.split(r'\n\s*\n', text)
+    html_parts = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # preserve single newlines as a double break for more vertical separation
+        p = p.replace("\n", "<br><br>")
+        # add bottom margin so paragraphs are clearly separated across clients
+        html_parts.append(f'<p style="margin:0 0 14px 0;">{p}</p>')
+    return "\n".join(html_parts)
+
+def build_html_email(
+    subject: str,
+    body_text: str,
+    *,
+    preheader: str = "",
+    logo_cid: str = "cid:brandlogo",
+    show_footer: bool = True,
+) -> str:
+    """
+    Wraps your mostly-text body in a light, cross-client-friendly HTML shell.
+    Uses table layout for wide client support. Inline styles only.
+    """
+    year = datetime.now().year
+    body_html = _text_to_html_paragraphs(body_text or "")
+
+    preheader = (preheader or "").strip()
+    if not preheader:
+        sample = re.sub("<[^<]+?>", "", body_text or "").strip()
+        preheader = sample[:100]
+
+    footer_html = f"""
+      <tr>
+        <td style="padding:28px 24px 24px; color:#6b7280; font-size:12px; line-height:18px; text-align:center;">
+          You’re receiving this message because we thought it might be relevant to your work. 
+          If this isn’t for you, just reply “unsubscribe”.<br><br>
+          © {year} Henderson Associates — All rights reserved.
+        </td>
+      </tr>
+    """ if show_footer else ""
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="x-apple-disable-message-reformatting">
+    <meta name="format-detection" content="telephone=no,address=no,email=no,date=no,url=no">
+    <title>{subject}</title>
+  </head>
+  <body style="margin:0; padding:0; background:#f5f5f5; -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%;">
+    <!-- Preheader text: hidden preview in many inboxes -->
+    <div style="display:none; overflow:hidden; line-height:1px; opacity:0; max-height:0; max-width:0;">
+      {preheader}
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;">
+      <tr>
+        <td align="center" style="padding:24px 12px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px; background:#ffffff; border-radius:10px; overflow:hidden; border:1px solid #e5e7eb;">
+            <tr>
+              <td align="center" style="padding:20px 20px 0;">
+                <img src="{logo_cid}" alt="Henderson" style="height:38px; width:auto; display:block;">
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:20px 24px 8px; color:#111827; font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size:16px; line-height:28px;">
+                {body_html}
+              </td>
+            </tr>
+
+            {footer_html}
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
 
 # ------- DUCKDUCKGO SEARCH -------
 def _ddg_text_with_backoff(ddgs: "DDGS", query: str, max_results: int, retries: int = 6):
@@ -364,7 +474,7 @@ def save_draft(prospect_id: int, subject: str, body: str, model: str = "moonshot
         conn.commit()
         return c.lastrowid
 
-# ------- SMTP Sending -------
+# ------- SMTP Sending (with HTML template, CID logo, plain-text alt) -------
 def get_smtp_settings():
     return {
         "host": (st.session_state.get("smtp_host") or os.environ.get("SMTP_HOST") or "").strip(),
@@ -373,7 +483,6 @@ def get_smtp_settings():
         "password": st.session_state.get("smtp_pass") or os.environ.get("SMTP_PASS") or "",
         "from_name": st.session_state.get("smtp_from_name") or os.environ.get("SMTP_FROM_NAME") or "Outreach Bot",
         "from_email": (st.session_state.get("smtp_from_email") or os.environ.get("SMTP_FROM_EMAIL") or "").strip(),
-        # NEW options for robust delivery:
         "security": (st.session_state.get("smtp_security") or os.environ.get("SMTP_SECURITY") or "starttls").lower(),  # starttls|ssl|none
         "envelope_from": (st.session_state.get("smtp_envelope_from") or os.environ.get("SMTP_ENVELOPE_FROM") or "").strip(),
         "timeout": 30,
@@ -385,26 +494,59 @@ def send_email_smtp(to_email: str, subject: str, html_body: str) -> Tuple[bool, 
     if not all(required):
         return False, "Missing SMTP settings. Host/User/Pass/From are required."
 
-    # Header From (displayed to recipients)
     header_from_email = cfg["from_email"] or cfg["user"]
     from_header = formataddr((cfg["from_name"], header_from_email))
-
-    # Envelope MAIL FROM (best to use authenticated user)
     envelope_from = cfg["envelope_from"] or cfg["user"]
 
-    # Build message
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = from_header
-    msg["To"] = to_email
+    # Outer multipart/related for inline images; inside: multipart/alternative (plain + html)
+    root = MIMEMultipart("related")
+    root["Subject"] = subject
+    root["From"] = from_header
+    root["To"] = to_email
 
+    alt = MIMEMultipart("alternative")
+    root.attach(alt)
+
+    # Ensure HTML signature is present
+    sig_html = _signature_html_from_settings()
+    if sig_html and (st.session_state.get("sender_name") or os.environ.get("SENDER_NAME")):
+        if (st.session_state.get("sender_name") or os.environ.get("SENDER_NAME")) not in (html_body or ""):
+            html_body = (html_body or "").strip() + sig_html
+
+    # Plain text fallback derived from whatever is in html_body (and spaced for readability)
     text_body = re.sub("<[^<]+?>", "", html_body or "")
-    msg.attach(MIMEText(text_body or "", "plain", "utf-8"))
-    msg.attach(MIMEText(html_body or "", "html", "utf-8"))
+    text_body = text_body.replace("\r\n", "\n").replace("\n", "\n\n")
+
+    # Wrap with lean template (re-paragraphized from text for consistent spacing)
+    final_html = build_html_email(
+        subject=subject or "",
+        body_text=text_body,
+        preheader="",
+        logo_cid="cid:brandlogo",
+        show_footer=True,
+    )
+
+    alt.attach(MIMEText(text_body or "", "plain", "utf-8"))
+    alt.attach(MIMEText(final_html or "", "html", "utf-8"))
+
+    # Attach inline logo if available
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = "."
+    logo_path = os.path.join(base_dir, "hca_logo.png")
+    if os.path.exists(logo_path):
+        try:
+            with open(logo_path, "rb") as f:
+                img = MIMEImage(f.read())
+            img.add_header("Content-ID", "<brandlogo>")
+            img.add_header("Content-Disposition", "inline", filename="hca_logo.png")
+            root.attach(img)
+        except Exception:
+            pass  # non-fatal
 
     context = ssl.create_default_context()
     try:
-        # Choose transport based on security/port
         if cfg["security"] == "ssl" or int(cfg["port"]) == 465:
             server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=cfg["timeout"], context=context)
         else:
@@ -415,12 +557,9 @@ def send_email_smtp(to_email: str, subject: str, html_body: str) -> Tuple[bool, 
             if cfg["security"] == "starttls":
                 server.starttls(context=context)
                 server.ehlo()
-            # 'none' means plain (use only on trusted networks/smarthosts)
             if cfg["user"]:
                 server.login(cfg["user"], cfg["password"])
-
-            # send_message ensures headers are used; set explicit envelope sender
-            server.send_message(msg, from_addr=envelope_from, to_addrs=[to_email])
+            server.send_message(root, from_addr=envelope_from, to_addrs=[to_email])
 
         return True, "Sent"
     except smtplib.SMTPAuthenticationError as e:
@@ -644,31 +783,6 @@ This tool helps you:
 1) **Research**: collect URLs from keywords (DuckDuckGo) and/or seed URLs, then crawl for contacts.
 2) **Write**: generate tailored outreach drafts with Groq.
 3) **Review/Send**: edit drafts, approve, and send via **SMTP**.
-
-Quickstart
-1) Python 3.10+
-2) Install deps:
-
-pip install -U streamlit groq crawl4ai python-dotenv duckduckgo-search aiohttp pandas
-crawl4ai-setup
-python -m playwright install --with-deps chromium
-
-3) Env (or fill in Settings):
-
-GROQ_API_KEY=...
-SMTP_HOST=...
-SMTP_PORT=587
-SMTP_USER=you@example.com
-SMTP_PASS=app_password
-SMTP_FROM_NAME="Your Name"
-SMTP_FROM_EMAIL=you@example.com
-SMTP_SECURITY=starttls
-# Optional:
-SMTP_ENVELOPE_FROM=you@example.com
-SENDER_NAME="Your Name"
-SENDER_TITLE="Your Position"
-
-4) Run:  streamlit run app.py
 """)
 
 research_tab, write_tab, drafts_tab = st.tabs(["🔎 Research", "✍️ Write", "📬 Drafts & Sending"])
@@ -737,7 +851,6 @@ with research_tab:
                 st.info("Crawling is disabled (Crawl4AI not installed). URLs collected above.")
 
     # --- Manually add prospects (emails) ---
-    # If last click asked to clear, do it *before* creating the widget this run
     if st.session_state.pop("reset_manual_emails", False):
         st.session_state["manual_emails"] = ""
 
@@ -760,7 +873,6 @@ with research_tab:
                     st.success(f"Processed {attempted} line(s). Valid emails: {valid}. Added {inserted} new prospect(s).")
                 if valid - inserted > 0 or duplicates > 0:
                     st.info(f"Duplicates or re-pasted within this submission: {duplicates}. Invalid lines: {attempted - valid}.")
-                # Ask next run to clear the widget value, then rerun immediately
                 st.session_state["reset_manual_emails"] = True
                 st.rerun()
     with col_m2:
@@ -862,8 +974,9 @@ with drafts_tab:
             draft_id, prospect_id, subject, body, status, email = d
             with st.expander(f"Draft #{draft_id} → {email} [{status}]", expanded=False):
                 new_subject = st.text_input("Subject", value=subject, key=f"sub_{draft_id}")
-                new_body = st.text_area("Body (supports HTML)", value=body, height=220, key=f"body_{draft_id}")
-                col1, col2, col3, col4 = st.columns([1,1,1,2])
+                new_body = st.text_area("Body (supports HTML; text preferred)", value=body, height=220, key=f"body_{draft_id}")
+                col1, col2, col3, col4, col5 = st.columns([1,1,1,1,2])
+
                 with col1:
                     if st.button("Save", key=f"save_{draft_id}"):
                         with db_conn() as conn:
@@ -873,6 +986,7 @@ with drafts_tab:
                             )
                             conn.commit()
                         st.toast("Saved.")
+
                 with col2:
                     if st.button("Approve", key=f"approve_{draft_id}"):
                         with db_conn() as conn:
@@ -883,7 +997,23 @@ with drafts_tab:
                             conn.commit()
                         st.toast("Approved.")
                         st.rerun()
+
                 with col3:
+                    if st.button("Preview", key=f"preview_{draft_id}"):
+                        preview_text = re.sub("<[^<]+?>", "", new_body or "")
+                        # add readability to preview as well
+                        preview_text = preview_text.replace("\r\n", "\n").replace("\n", "\n\n")
+                        preview_html = build_html_email(
+                            subject=new_subject or "",
+                            body_text=preview_text,
+                            preheader="",
+                            logo_cid="cid:brandlogo",  # CID won't resolve in Streamlit; layout preview only
+                            show_footer=True,
+                        )
+                        st.markdown("**Preview (approximate):**", help="Inline logo uses CID and will not render here.")
+                        st.components.v1.html(preview_html, height=700, scrolling=True)
+
+                with col4:
                     send_now = st.button("Send", key=f"send_{draft_id}")
                     if send_now:
                         ok, msg = send_email_smtp(email, new_subject, new_body)
@@ -898,7 +1028,8 @@ with drafts_tab:
                         else:
                             st.error(f"Send failed: {msg}")
                         st.rerun()
-                with col4:
+
+                with col5:
                     st.caption("Tip: Approved drafts are ready for batch sending.")
 
         st.divider()
